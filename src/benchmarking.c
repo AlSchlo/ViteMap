@@ -95,14 +95,14 @@ BenchmarkResult benchmark_zstd(uint8_t *bitmap, size_t size) {
 BenchmarkResult benchmark_vitemap(uint8_t *bitmap, size_t size) {
   struct timespec start, end;
 
-  Vitemap vm = vitemap_create(size);
-  memcpy(vm.input, bitmap, size);
+  Vitemap *vm = vitemap_create(size);
+  memcpy(vm->input, bitmap, size);
 
   clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-  size_t output_length = vitemap_compress(&vm, size);
+  size_t output_length = vitemap_compress(vm, size);
   clock_gettime(CLOCK_MONOTONIC_RAW, &end);
 
-  vitemap_delete(&vm);
+  vitemap_delete(vm);
 
   long time_diff = calculate_time_diff(start, end);
 

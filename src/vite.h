@@ -53,7 +53,7 @@ typedef struct {
  * The function allocates memory for input and output buffers, rounding up
  * the input size to the nearest multiple of 32 bytes.
  */
-Vitemap vitemap_create(size_t upper_size);
+Vitemap *vitemap_create(size_t upper_size);
 
 /**
  * Frees all memory associated with a Vitemap structure

@@ -21,8 +21,8 @@
 // Calling this function in the critical section increases incoding time by
 // ~25%. When maintaining the bitmap, it makes sense to dynamically keep track
 // of the bucket sizes, so this could be a potential optimization.
-static size_t popcount_256(const void *ptr) {
-  __m256i vec = _mm256_loadu_si256((const __m256i *)ptr);
+static size_t popcount_256(uint8_t *restrict ptr) {
+  __m256i vec = _mm256_loadu_si256((__m256i *)ptr);
   __m256i popcnt = _mm256_popcnt_epi64(vec);
   __m128i sum = _mm_add_epi64(_mm256_castsi256_si128(popcnt),
                               _mm256_extracti128_si256(popcnt, 1));
@@ -33,31 +33,32 @@ static size_t popcount_256(const void *ptr) {
 // Performs highly optimized selective bit extraction and compaction.
 // Uses precomputed indices to selectively extract and compact bits from a
 // 256-bit (4x64-bit) bucket using AVX-512 SIMD instructions.
-static void extract_and_compact_bits(uint64_t *restrict src,
-                                     uint8_t *restrict dst,
-                                     uint8_t *restrict indices) {
+static void extract_and_compact_256(uint64_t *restrict src,
+                                    uint8_t *restrict dst,
+                                    uint8_t *restrict indices) {
   for (size_t i = 0; i < BUCKET_SIZE_U64; i++) {
     __m512i indices_vector = _mm512_loadu_si512(indices);
     __m512i compact = _mm512_maskz_compress_epi8(*src, indices_vector);
-    __m128i lower_128 = _mm512_castsi512_si128(compact);
-    _mm_storeu_si64((__m128i *)dst, lower_128);
+    _mm512_storeu_epi8(
+        dst,
+        compact); // This instruction will systematically
+                  // overflow to the next bucket. However, since each bucket is
+                  // processed sequentially, this is not a problem. Furthermore,
+                  // we allocate one extra bucket at the end of the output
+                  // buffer to avoid any tail buffer overflows.
+
     dst += _mm_popcnt_u64(*src);
     src += 1;
     indices += 64;
   }
 }
 
-// Inverts all bits in a bucket.
-// TODO(alexis): Implement this function.
-static void invert_all(uint8_t *restrict src, uint8_t *restrict dst) {
-  /*for (size_t i = 0; i < WC_SIZE; i += 64) {
-    __m512i v = _mm512_loadu_si512((__m512i *)(src + i));
-
-    __mmask64 mask = _mm512_cmpeq_epi8_mask(v, _mm512_setzero_si512());
-
-    // Convert mask to 0 or 1 values
-    _mm512_mask_storeu_epi8(dst + i, mask, _mm512_set1_epi8(1));
-  }*/
+// Inverts all 256 bits in src and stores inverse into dst.
+static void invert_256(uint8_t *restrict src, uint8_t *restrict dst) {
+  __m256i src_vec = _mm256_loadu_si256((__m256i *)src);
+  __m256i all_ones = _mm256_set1_epi8((char)0xFFU);
+  __m256i inverted = _mm256_xor_si256(src_vec, all_ones);
+  _mm256_store_si256((__m256i *)dst, inverted);
 }
 
 // Useful debugging function.
@@ -70,25 +71,39 @@ static void print_binaries(uint8_t *arr, size_t len) {
   printf("\n");
 }
 
-Vitemap vitemap_create(size_t size) {
-  uint32_t num_buckets = (size + BUCKET_SIZE_U8 - 1) / BUCKET_SIZE_U8;
-  Vitemap vm;
+Vitemap *vitemap_create(size_t size) {
+  size_t full_buckets = size / BUCKET_SIZE_U8;
+  size_t remaining_bytes = size % BUCKET_SIZE_U8;
+  size_t num_buckets = full_buckets + (remaining_bytes > 0 ? 1 : 0);
 
-  vm.max_size = num_buckets * BUCKET_SIZE_U8;
-  vm.num_buckets = num_buckets;
-  vm.input = calloc(vm.max_size, sizeof(uint8_t));
+  Vitemap *vm = calloc(1, sizeof(Vitemap));
+  if (vm == NULL) {
+    return NULL;
+  }
 
-  vm.max_compressed_size =
-      4 + vm.max_size +
+  vm->max_size = num_buckets * BUCKET_SIZE_U8;
+  vm->num_buckets = num_buckets;
+
+  vm->max_compressed_size =
+      4 + vm->max_size +
       num_buckets *
           BUCKET_SIZE_U8; // Orig size + offsets + worst-case encoded size.
-  vm.output = calloc(vm.max_compressed_size, sizeof(uint8_t));
 
-  vm.indices = calloc(BUCKET_SIZE, sizeof(uint8_t));
-  for (size_t i = 0; i < BUCKET_SIZE; i++) {
-    vm.indices[i] = i;
+  vm->input = calloc(vm->max_size, sizeof(uint8_t));
+  vm->output = calloc(vm->max_compressed_size + BUCKET_SIZE_U8,
+                      sizeof(uint8_t)); // See `extract_and_compact_256` for
+                                        // extra bucket explanation.
+  vm->indices = calloc(BUCKET_SIZE, sizeof(uint8_t));
+  vm->helper_bucket = calloc(BUCKET_SIZE_U8, sizeof(uint8_t));
+  if (vm->input == NULL || vm->output == NULL || vm->indices == NULL ||
+      vm->helper_bucket == NULL) {
+    vitemap_delete(vm);
+    return NULL;
   }
-  vm.helper_bucket = calloc(BUCKET_SIZE_U8, sizeof(uint8_t));
+
+  for (size_t i = 0; i < BUCKET_SIZE; i++) {
+    vm->indices[i] = i;
+  }
 
   return vm;
 }
@@ -102,6 +117,7 @@ void vitemap_delete(Vitemap *vm) {
   vm->indices = NULL;
   free(vm->helper_bucket);
   vm->helper_bucket = NULL;
+  free(vm);
 }
 
 size_t vitemap_compress(Vitemap *vm, size_t size) {
@@ -116,32 +132,25 @@ size_t vitemap_compress(Vitemap *vm, size_t size) {
   for (size_t bucket = 0; bucket < vm->num_buckets; bucket++) {
     size_t count = popcount_256(input);
     if (count < BUCKET_SIZE_U8) {
-      // printf("A: %zu\n", bucket);
-
       *output = count;
       output += 1;
 
-      extract_and_compact_bits((uint64_t *)(input), output, vm->indices);
+      extract_and_compact_256((uint64_t *)(input), output, vm->indices);
       output += count;
 
       result_size += (1 + count);
     } else if (BUCKET_SIZE - count < BUCKET_SIZE_U8) {
-      // printf("~A: %zu\n", bucket);
-
-      *output = (BUCKET_SIZE - count);
+      *output = (BUCKET_SIZE - count) | 0b10000000;
       output += 1;
 
-      // TODO(alexis).
-      /*invert_all(input, vm->helper_buf);
-      flatten_indices((uint64_t *)(vm->helper_buf),
-                      (result_buf + result_size), indices);*/
+      invert_256(input, vm->helper_bucket);
+      extract_and_compact_256((uint64_t *)(vm->helper_bucket), output,
+                              vm->indices);
       output += (BUCKET_SIZE - count);
 
       result_size += (1 + BUCKET_SIZE - count);
     } else {
-      // printf("B: %zu\n", bucket);
-
-      *output = BUCKET_SIZE_U8;
+      *output = BUCKET_SIZE_U8 | 0b01100000;
       output += 1;
 
       memcpy(output, input, BUCKET_SIZE_U8);
