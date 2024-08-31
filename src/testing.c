@@ -156,14 +156,16 @@ static bool test_multiple_bitmap_buckets() {
   return true;
 }
 
-static bool test_single_array_bucket() {
+typedef struct {
+  uint8_t input[BUCKET_SIZE_U8];
+  size_t bits_set;
+  uint8_t expected_output[BUCKET_SIZE_U8];
+  const char *description;
+} ArrayBucketExample;
+
+static bool test_single_array_bucket(ArrayBucketExample *example) {
   Vitemap vm = vitemap_create(BUCKET_SIZE_U8);
-  vm.input[0] = 0b10101010;
-  vm.input[1] = 0b00000000;
-  vm.input[2] = 0b00010000;
-  vm.input[3] = 0b00000100;
-  vm.input[4] = 0b00000000;
-  vm.input[31] = 0b00000001;
+  memcpy(vm.input, example->input, BUCKET_SIZE_U8);
 
   vitemap_compress(&vm, BUCKET_SIZE_U8);
 
@@ -174,8 +176,24 @@ static bool test_single_array_bucket() {
     return false;
   }
 
-  if (vm.output[4] != 7) {
-    printf("Offset was %d, expected %d.\n", vm.output[0], 7);
+  if (vm.output[4] != example->bits_set) {
+    printf("Bits set was %d, expected %zu.\n", vm.output[4], example->bits_set);
+    vitemap_delete(&vm);
+    return false;
+  }
+
+  uint8_t *dst = vm.output + 5;
+  if (memcmp(dst, example->expected_output, example->bits_set) != 0) {
+    printf("Array encoding is not identical.\n");
+    printf("\033[1mExpected:\033[0m\n[");
+    for (size_t i = 0; i < example->bits_set; i++) {
+      printf("%d%s", example->expected_output[i],
+             i < example->bits_set - 1 ? " " : "]\n");
+    }
+    printf("\033[1mGot:\033[0m\n[");
+    for (size_t i = 0; i < example->bits_set; i++) {
+      printf("%d%s", dst[i], i < example->bits_set - 1 ? " " : "]\n");
+    }
     vitemap_delete(&vm);
     return false;
   }
@@ -183,6 +201,59 @@ static bool test_single_array_bucket() {
   vitemap_delete(&vm);
   return true;
 }
+
+// A bunch of single array bucket tests.
+static ArrayBucketExample array_bucket_configs[] = {
+    {.input = {0b10101010, 0, 0b00010000, 0b00000100, 0, [31] = 0b00000001},
+     .bits_set = 7,
+     .expected_output = {1, 3, 5, 7, 20, 26, 248},
+     .description = "A `sparse` bitmap of 1 bucket should use array encoding "
+                    "(sparse in the middle)."},
+    {.input = {0b10000000, 0, 0, 0, [31] = 0b00000001},
+     .bits_set = 2,
+     .expected_output = {7, 248},
+     .description = "A `sparse` bitmap of 1 bucket should use array encoding "
+                    "(sparse at the beginning)."},
+    {.input = {[30] = 0b00000001, [31] = 0b10000000},
+     .bits_set = 2,
+     .expected_output = {240, 255},
+     .description = "A `sparse` bitmap of 1 bucket should use array encoding "
+                    "(sparse at the end)."},
+    {.input = {0b10000000, 0b01000000, 0b00100000, 0b00010000, 0b00001000,
+               0b00000100, 0b00000010},
+     .bits_set = 7,
+     .expected_output = {7, 14, 21, 28, 35, 42, 49},
+     .description = "A `sparse` bitmap of 1 bucket should use array encoding "
+                    "(almost 1/8 bits set)."},
+    {.input = {[15] = 0b00010000},
+     .bits_set = 1,
+     .expected_output = {124},
+     .description = "A `sparse` bitmap of 1 bucket should use array encoding "
+                    "(single bit set)."},
+};
+
+static bool test_array_bucket_1() {
+  return test_single_array_bucket(&array_bucket_configs[0]);
+}
+static bool test_array_bucket_2() {
+  return test_single_array_bucket(&array_bucket_configs[1]);
+}
+static bool test_array_bucket_3() {
+  return test_single_array_bucket(&array_bucket_configs[2]);
+}
+static bool test_array_bucket_4() {
+  return test_single_array_bucket(&array_bucket_configs[3]);
+}
+static bool test_array_bucket_5() {
+  return test_single_array_bucket(&array_bucket_configs[4]);
+}
+static bool test_array_bucket_6() {
+  return test_single_array_bucket(&array_bucket_configs[5]);
+}
+
+static test_function array_bucket_tests[] = {
+    test_array_bucket_1, test_array_bucket_2, test_array_bucket_3,
+    test_array_bucket_4, test_array_bucket_5, test_array_bucket_6};
 
 static bool test_round_up_input_size() {
   Vitemap vm = vitemap_create(1);
@@ -223,8 +294,11 @@ int main() {
   add_test("A `random` bitmap of 100 buckets should use bitmap encoding.",
            test_multiple_bitmap_buckets);
 
-  add_test("A `sparse` bitmap of 1 bucket should use array encoding.",
-           test_single_array_bucket);
+  for (size_t i = 0;
+       i < sizeof(array_bucket_configs) / sizeof(array_bucket_configs[0]);
+       i++) {
+    add_test(array_bucket_configs[i].description, array_bucket_tests[i]);
+  }
 
   add_test("Input size should round to upper 32B.", test_round_up_input_size);
 
