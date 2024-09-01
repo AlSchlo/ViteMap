@@ -17,6 +17,32 @@
 #include <stdio.h>
 #include <string.h>
 
+// Align to 32-byte boundary for efficient AVX2 loads.
+__attribute__((aligned(32))) static uint64_t bit_lookup[BUCKET_SIZE][4] = {{0}};
+__attribute__((constructor)) static void init_bit_lookup(void) {
+  for (size_t i = 0; i < BUCKET_SIZE; i++) {
+    size_t chunk = i / 64;
+    size_t bit = i % 64;
+    bit_lookup[i][chunk] = 1ULL << bit;
+  }
+}
+__attribute__((aligned(32))) static uint8_t indices[BUCKET_SIZE] = {0};
+__attribute__((constructor)) static void init_indices(void) {
+  for (size_t i = 0; i < BUCKET_SIZE; i++) {
+    indices[i] = i;
+  }
+}
+
+// Useful debugging function.
+static void print_binaries(uint8_t *arr, size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    for (int j = 7; j >= 0; j--) {
+      printf("%d", !!((arr[i] >> j) & 1));
+    }
+  }
+  printf("\n");
+}
+
 // Fast popcount for 256 bits.
 // Calling this function in the critical section increases incoding time by
 // ~25%. When maintaining the bitmap, it makes sense to dynamically keep track
@@ -34,10 +60,10 @@ static size_t popcount_256(uint8_t *restrict ptr) {
 // Uses precomputed indices to selectively extract and compact bits from a
 // 256-bit (4x64-bit) bucket using AVX-512 SIMD instructions.
 static void extract_and_compact_256(uint64_t *restrict src,
-                                    uint8_t *restrict dst,
-                                    uint8_t *restrict indices) {
+                                    uint8_t *restrict dst) {
+  uint8_t *restrict moving_indices = indices;
   for (size_t i = 0; i < BUCKET_SIZE_U64; i++) {
-    __m512i indices_vector = _mm512_loadu_si512(indices);
+    __m512i indices_vector = _mm512_loadu_si512(moving_indices);
     __m512i compact = _mm512_maskz_compress_epi8(*src, indices_vector);
     _mm512_storeu_epi8(
         dst,
@@ -49,8 +75,24 @@ static void extract_and_compact_256(uint64_t *restrict src,
 
     dst += _mm_popcnt_u64(*src);
     src += 1;
-    indices += 64;
+    moving_indices += 64;
   }
+}
+
+// Performs highly optimized selective bit expansion and scattering.
+// Uses provided indices to selectively expand and scatter bits into a
+// 256-bit (4x64-bit) bucket using AVX2 SIMD instructions.
+// Uses a 65KB lookup table for fast bit expansion.
+static void expand_and_scatter_256(const uint8_t *restrict src,
+                                   size_t bucket_size, uint8_t *restrict dst) {
+  __m256i result = _mm256_setzero_si256();
+
+  for (size_t i = 0; i < bucket_size; i++) {
+    __m256i lookup = _mm256_loadu_si256((__m256i *)bit_lookup[src[i]]);
+    result = _mm256_or_si256(result, lookup);
+  }
+
+  _mm256_storeu_si256((__m256i *)dst, result);
 }
 
 // Inverts all 256 bits in src and stores inverse into dst.
@@ -58,23 +100,13 @@ static void invert_256(uint8_t *restrict src, uint8_t *restrict dst) {
   __m256i src_vec = _mm256_loadu_si256((__m256i *)src);
   __m256i all_ones = _mm256_set1_epi8((char)0xFFU);
   __m256i inverted = _mm256_xor_si256(src_vec, all_ones);
-  _mm256_store_si256((__m256i *)dst, inverted);
+  _mm256_storeu_si256((__m256i *)dst, inverted);
 }
 
-// Useful debugging function.
-static void print_binaries(uint8_t *arr, size_t len) {
-  for (size_t i = 0; i < len; i++) {
-    for (int j = 7; j >= 0; j--) {
-      printf("%d", !!((arr[i] >> j) & 1));
-    }
-  }
-  printf("\n");
-}
-
-Vitemap *vitemap_create(size_t size) {
-  size_t full_buckets = size / BUCKET_SIZE_U8;
-  size_t remaining_bytes = size % BUCKET_SIZE_U8;
-  size_t num_buckets = full_buckets + (remaining_bytes > 0 ? 1 : 0);
+Vitemap *vitemap_create(uint32_t size) {
+  uint32_t full_buckets = size / BUCKET_SIZE_U8;
+  uint32_t remaining_bytes = size % BUCKET_SIZE_U8;
+  uint32_t num_buckets = full_buckets + (remaining_bytes > 0 ? 1 : 0);
 
   Vitemap *vm = calloc(1, sizeof(Vitemap));
   if (vm == NULL) {
@@ -93,16 +125,10 @@ Vitemap *vitemap_create(size_t size) {
   vm->output = calloc(vm->max_compressed_size + BUCKET_SIZE_U8,
                       sizeof(uint8_t)); // See `extract_and_compact_256` for
                                         // extra bucket explanation.
-  vm->indices = calloc(BUCKET_SIZE, sizeof(uint8_t));
   vm->helper_bucket = calloc(BUCKET_SIZE_U8, sizeof(uint8_t));
-  if (vm->input == NULL || vm->output == NULL || vm->indices == NULL ||
-      vm->helper_bucket == NULL) {
+  if (vm->input == NULL || vm->output == NULL || vm->helper_bucket == NULL) {
     vitemap_delete(vm);
     return NULL;
-  }
-
-  for (size_t i = 0; i < BUCKET_SIZE; i++) {
-    vm->indices[i] = i;
   }
 
   return vm;
@@ -113,15 +139,13 @@ void vitemap_delete(Vitemap *vm) {
   vm->input = NULL;
   free(vm->output);
   vm->output = NULL;
-  free(vm->indices);
-  vm->indices = NULL;
   free(vm->helper_bucket);
   vm->helper_bucket = NULL;
   free(vm);
 }
 
-size_t vitemap_compress(Vitemap *vm, size_t size) {
-  size_t result_size = 0;
+uint32_t vitemap_compress(Vitemap *vm, uint32_t size) {
+  uint32_t result_size = 0;
   uint8_t *input = vm->input;
   uint8_t *output = vm->output;
 
@@ -135,22 +159,21 @@ size_t vitemap_compress(Vitemap *vm, size_t size) {
       *output = count;
       output += 1;
 
-      extract_and_compact_256((uint64_t *)(input), output, vm->indices);
+      extract_and_compact_256((uint64_t *)(input), output);
       output += count;
 
       result_size += (1 + count);
     } else if (BUCKET_SIZE - count < BUCKET_SIZE_U8) {
-      *output = (BUCKET_SIZE - count) | 0b10000000;
+      *output = (BUCKET_SIZE - count) | 0b01000000;
       output += 1;
 
       invert_256(input, vm->helper_bucket);
-      extract_and_compact_256((uint64_t *)(vm->helper_bucket), output,
-                              vm->indices);
+      extract_and_compact_256((uint64_t *)(vm->helper_bucket), output);
       output += (BUCKET_SIZE - count);
 
       result_size += (1 + BUCKET_SIZE - count);
     } else {
-      *output = BUCKET_SIZE_U8 | 0b01100000;
+      *output = BUCKET_SIZE_U8 | 0b10000000;
       output += 1;
 
       memcpy(output, input, BUCKET_SIZE_U8);
@@ -163,4 +186,36 @@ size_t vitemap_compress(Vitemap *vm, size_t size) {
   }
 
   return result_size;
+}
+
+uint32_t vitemap_extract_decompressed_size(uint8_t *compressed_data) {
+  return *(uint32_t *)compressed_data;
+}
+
+void vitemap_decompress(uint8_t *compressed_data, uint32_t size,
+                        uint8_t *decompressed_data) {
+  const uint8_t *end = compressed_data + size;
+  compressed_data += 4;
+
+  while (compressed_data < end) {
+    uint8_t bucket_size = *compressed_data & 0x3F;
+    uint8_t category = *compressed_data >> 6;
+    compressed_data += 1;
+
+    switch (category) {
+    case 0:
+      expand_and_scatter_256(compressed_data, bucket_size, decompressed_data);
+      break;
+    case 1:
+      expand_and_scatter_256(compressed_data, bucket_size, decompressed_data);
+      invert_256(decompressed_data, decompressed_data);
+      break;
+    case 2:
+      memcpy(decompressed_data, compressed_data, BUCKET_SIZE_U8);
+      break;
+    }
+
+    compressed_data += bucket_size;
+    decompressed_data += BUCKET_SIZE_U8;
+  }
 }

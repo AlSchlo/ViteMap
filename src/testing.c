@@ -16,6 +16,7 @@
 
 #include <assert.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -89,8 +90,8 @@ static bool test_single_bitmap_bucket() {
     return false;
   }
 
-  if (vm->output[4] != (32 | 0b01100000)) {
-    printf("Metadata was %d, expected %d.\n", vm->output[0], (32 | 0b01100000));
+  if (vm->output[4] != (32 | 0b10000000)) {
+    printf("Metadata was %d, expected %d.\n", vm->output[0], (32 | 0b10000000));
     vitemap_delete(vm);
     return false;
   }
@@ -110,8 +111,8 @@ static bool test_single_bitmap_bucket() {
 }
 
 static bool test_multiple_bitmap_buckets() {
-  size_t num_buckets = 100;
-  size_t size = num_buckets * BUCKET_SIZE_U8;
+  uint32_t num_buckets = 100;
+  uint32_t size = num_buckets * BUCKET_SIZE_U8;
 
   Vitemap *vm = vitemap_create(size);
   for (size_t i = 0; i < size; i++) {
@@ -124,16 +125,16 @@ static bool test_multiple_bitmap_buckets() {
   uint8_t *dst = vm->output;
 
   if (*(uint32_t *)dst != size) {
-    printf("Orig size was %d, expected %zu.\n", *(uint32_t *)dst, size);
+    printf("Orig size was %d, expected %d.\n", *(uint32_t *)dst, size);
     vitemap_delete(vm);
     return false;
   }
   dst += 4;
 
   for (size_t i = 0; i < num_buckets; i++) {
-    if (*dst != (32 | 0b01100000)) {
+    if (*dst != (32 | 0b10000000)) {
       printf("Metadata was %d, expected %d (bucket %zu).\n", *dst,
-             (32 | 0b01100000), i);
+             (32 | 0b10000000), i);
       vitemap_delete(vm);
       return false;
     }
@@ -172,7 +173,7 @@ static bool test_single_array_bucket(ArrayBucketExample *example, bool invert) {
     vm->input[i] = invert ? ~example->input[i] : example->input[i];
   }
 
-  vitemap_compress(vm, BUCKET_SIZE_U8);
+  uint32_t size = vitemap_compress(vm, BUCKET_SIZE_U8);
 
   if (*(uint32_t *)vm->output != BUCKET_SIZE_U8) {
     printf("Orig size was %d, expected %d.\n", *(uint32_t *)vm->output,
@@ -181,11 +182,10 @@ static bool test_single_array_bucket(ArrayBucketExample *example, bool invert) {
     return false;
   }
 
-  size_t expected_metadata =
-      invert ? (example->bits_set | 0b10000000) : example->bits_set;
+  uint8_t expected_metadata =
+      invert ? (example->bits_set | 0b01000000) : example->bits_set;
   if (vm->output[4] != expected_metadata) {
-    printf("Metadata was %d, expected %zu.\n", vm->output[4],
-           expected_metadata);
+    printf("Metadata was %d, expected %d.\n", vm->output[4], expected_metadata);
     vitemap_delete(vm);
     return false;
   }
@@ -208,6 +208,7 @@ static bool test_single_array_bucket(ArrayBucketExample *example, bool invert) {
 
   vitemap_delete(vm);
   printf("\033[1;32m✓\033[0m\n");
+
   return true;
 }
 
@@ -283,12 +284,12 @@ static test_function array_bucket_tests[] = {
 static bool test_round_up_input_size() {
   Vitemap *vm = vitemap_create(1);
   if (vm->max_size != BUCKET_SIZE_U8) {
-    printf("Max size was %zu, expected %d.\n", vm->max_size, 32);
+    printf("Max size was %d, expected %d.\n", vm->max_size, 32);
     vitemap_delete(vm);
     return false;
   }
   if (vm->num_buckets != 1) {
-    printf("Num buckets was %zu, expected %d.\n", vm->num_buckets, 1);
+    printf("Num buckets was %d, expected %d.\n", vm->num_buckets, 1);
     vitemap_delete(vm);
     return false;
   }
@@ -297,12 +298,12 @@ static bool test_round_up_input_size() {
 
   vm = vitemap_create(100);
   if (vm->max_size != BUCKET_SIZE_U8 * 4) {
-    printf("Max size was %zu, expected %d.\n", vm->max_size, 32);
+    printf("Max size was %d, expected %d.\n", vm->max_size, 32);
     vitemap_delete(vm);
     return false;
   }
   if (vm->num_buckets != 4) {
-    printf("Num buckets was %zu, expected %d.\n", vm->num_buckets, 1);
+    printf("Num buckets was %d, expected %d.\n", vm->num_buckets, 1);
     vitemap_delete(vm);
     return false;
   }

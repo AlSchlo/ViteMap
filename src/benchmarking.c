@@ -28,6 +28,15 @@
 #define NUM_ITERATIONS 100
 #define CONFIDENCE_LEVEL 0.95
 
+double total_initial_size = 0;
+double total_snappy_size = 0;
+double total_zstd_size = 0;
+double total_vitemap_size = 0;
+double total_snappy_time = 0;
+double total_zstd_time = 0;
+double total_vitemap_time = 0;
+int total_files = 0;
+
 // Statistics of benchmarking.
 typedef struct {
   long length;
@@ -211,6 +220,15 @@ void process_file(const char *filename) {
   printf("\n");
 
   free(bitmap);
+
+  total_files++;
+  total_initial_size += file_size;
+  total_snappy_size += snappy.length;
+  total_zstd_size += zstd.length;
+  total_vitemap_size += vitemap.length;
+  total_snappy_time += snappy.avg_time;
+  total_zstd_time += zstd.avg_time;
+  total_vitemap_time += vitemap.avg_time;
 }
 
 // Runs benchmarks for all files within the ./traces directory.
@@ -246,6 +264,23 @@ int main() {
     }
   }
   closedir(dir);
+
+  printf("Aggregate Statistics:\n");
+  printf("Average Initial Size: %.2f bytes\n",
+         total_initial_size / total_files);
+  printf("Snappy - Average Size: %.2f bytes (%.4f), Average Time: %.2f ns\n",
+         total_snappy_size / total_files,
+         (total_snappy_size / total_files) / (total_initial_size / total_files),
+         total_snappy_time / total_files);
+  printf("Zstd - Average Size: %.2f bytes (%.4f), Average Time: %.2f ns\n",
+         total_zstd_size / total_files,
+         (total_zstd_size / total_files) / (total_initial_size / total_files),
+         total_zstd_time / total_files);
+  printf("Vitemap - Average Size: %.2f bytes (%.4f), Average Time: %.2f ns\n",
+         total_vitemap_size / total_files,
+         (total_vitemap_size / total_files) /
+             (total_initial_size / total_files),
+         total_vitemap_time / total_files);
 
   return 0;
 }
