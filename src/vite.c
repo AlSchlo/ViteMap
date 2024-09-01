@@ -33,16 +33,6 @@ __attribute__((constructor)) static void init_indices(void) {
   }
 }
 
-// Useful debugging function.
-static void print_binaries(uint8_t *arr, size_t len) {
-  for (size_t i = 0; i < len; i++) {
-    for (int j = 7; j >= 0; j--) {
-      printf("%d", !!((arr[i] >> j) & 1));
-    }
-  }
-  printf("\n");
-}
-
 // Fast popcount for 256 bits.
 // Calling this function in the critical section increases incoding time by
 // ~25%. When maintaining the bitmap, it makes sense to dynamically keep track
@@ -83,11 +73,25 @@ static void extract_and_compact_256(uint64_t *restrict src,
 // Uses provided indices to selectively expand and scatter bits into a
 // 256-bit (4x64-bit) bucket using AVX2 SIMD instructions.
 // Uses a 65KB lookup table for fast bit expansion.
-static void expand_and_scatter_256(const uint8_t *restrict src,
-                                   size_t bucket_size, uint8_t *restrict dst) {
+static void expand_and_scatter_256(uint8_t *restrict src, size_t bucket_size,
+                                   uint8_t *restrict dst) {
   __m256i result = _mm256_setzero_si256();
+  size_t i;
 
-  for (size_t i = 0; i < bucket_size; i++) {
+  // Manually unrolling gives a substantial improvement benefit.
+  for (i = 0; i + 4 <= bucket_size; i += 4) {
+    __m256i lookup1 = _mm256_loadu_si256((__m256i *)bit_lookup[src[i]]);
+    __m256i lookup2 = _mm256_loadu_si256((__m256i *)bit_lookup[src[i + 1]]);
+    __m256i lookup3 = _mm256_loadu_si256((__m256i *)bit_lookup[src[i + 2]]);
+    __m256i lookup4 = _mm256_loadu_si256((__m256i *)bit_lookup[src[i + 3]]);
+
+    result = _mm256_or_si256(result, lookup1);
+    result = _mm256_or_si256(result, lookup2);
+    result = _mm256_or_si256(result, lookup3);
+    result = _mm256_or_si256(result, lookup4);
+  }
+
+  for (; i < bucket_size; i++) {
     __m256i lookup = _mm256_loadu_si256((__m256i *)bit_lookup[src[i]]);
     result = _mm256_or_si256(result, lookup);
   }
@@ -188,8 +192,14 @@ uint32_t vitemap_compress(Vitemap *vm, uint32_t size) {
   return result_size;
 }
 
-uint32_t vitemap_extract_decompressed_size(uint8_t *compressed_data) {
-  return *(uint32_t *)compressed_data;
+void vitemap_extract_decompressed_sizes(uint8_t *compressed_data,
+                                        uint32_t *data_size,
+                                        uint32_t *buffer_size) {
+  *data_size = *(uint32_t *)compressed_data;
+  uint32_t full_buckets = *data_size / BUCKET_SIZE_U8;
+  uint32_t remaining_bytes = *data_size % BUCKET_SIZE_U8;
+  *buffer_size =
+      (full_buckets + (remaining_bytes > 0 ? 1 : 0)) * BUCKET_SIZE_U8;
 }
 
 void vitemap_decompress(uint8_t *compressed_data, uint32_t size,
@@ -208,7 +218,11 @@ void vitemap_decompress(uint8_t *compressed_data, uint32_t size,
       break;
     case 1:
       expand_and_scatter_256(compressed_data, bucket_size, decompressed_data);
-      invert_256(decompressed_data, decompressed_data);
+      // Unrestricted version of invert_256.
+      __m256i src_vec = _mm256_loadu_si256((__m256i *)decompressed_data);
+      __m256i all_ones = _mm256_set1_epi8((char)0xFFU);
+      __m256i inverted = _mm256_xor_si256(src_vec, all_ones);
+      _mm256_storeu_si256((__m256i *)decompressed_data, inverted);
       break;
     case 2:
       memcpy(decompressed_data, compressed_data, BUCKET_SIZE_U8);

@@ -20,7 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define NUM_TESTS 100
+#define MAX_NUM_TESTS 100
 
 typedef bool (*test_function)(void);
 typedef struct {
@@ -28,7 +28,7 @@ typedef struct {
   test_function func;
 } test_case;
 
-test_case test_cases[NUM_TESTS];
+test_case test_cases[MAX_NUM_TESTS];
 size_t test_count = 0;
 
 static void print_binaries(uint8_t *arr, size_t len) {
@@ -41,7 +41,7 @@ static void print_binaries(uint8_t *arr, size_t len) {
 }
 
 static void add_test(const char *name, test_function func) {
-  assert(test_count < NUM_TESTS);
+  assert(test_count < MAX_NUM_TESTS);
   test_cases[test_count].name = name;
   test_cases[test_count].func = func;
   test_count++;

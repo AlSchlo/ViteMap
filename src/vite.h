@@ -76,15 +76,20 @@ void vitemap_delete(Vitemap *vm);
 uint32_t vitemap_compress(Vitemap *vm, uint32_t size);
 
 /**
- * Extracts the uncompressed data size from a compressed Vitemap.
+ * Extracts the uncompressed data size and buffer size to allocate from the
+ * compressed data
  *
  * @param compressed_data Pointer to the compressed data
- * @return Size of the decompressed data
+ * @param[out] data_size Pointer to the extracted data size
+ * @param[out] buffer_size Pointer to the extracted buffer size
  *
- * This function extracts the size of the *decompressed* data from the
- * compressed Vitemap. The size is stored in the first 4 bytes of the data.
+ * This function extracts the size of the *decompressed* data (and associate
+ * buffer size, rounding up to the nearest 32B) from the compressed Vitemap. The
+ * size is stored in the first 4 bytes of the data.
  */
-uint32_t vitemap_extract_decompressed_size(uint8_t *compressed_data);
+void vitemap_extract_decompressed_sizes(uint8_t *compressed_data,
+                                        uint32_t *data_size,
+                                        uint32_t *buffer_size);
 
 /**
  * Decompresses the input bitmap

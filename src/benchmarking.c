@@ -32,21 +32,29 @@ double total_initial_size = 0;
 double total_snappy_size = 0;
 double total_zstd_size = 0;
 double total_vitemap_size = 0;
-double total_snappy_time = 0;
-double total_zstd_time = 0;
-double total_vitemap_time = 0;
+double total_snappy_comp_time = 0;
+double total_zstd_comp_time = 0;
+double total_vitemap_comp_time = 0;
+double total_snappy_decomp_time = 0;
+double total_zstd_decomp_time = 0;
+double total_vitemap_decomp_time = 0;
 int total_files = 0;
 
 // Statistics of benchmarking.
 typedef struct {
   long length;
-  long time;
+  long comp_time;
+  long decomp_time;
+  int verified;
 } BenchmarkResult;
 
 typedef struct {
   long length;
-  double avg_time;
-  double ci_margin;
+  double avg_comp_time;
+  double ci_comp_margin;
+  double avg_decomp_time;
+  double ci_decomp_margin;
+  int verified;
 } AggregatedResult;
 
 // Helper function to calculate time difference in nanoseconds
@@ -62,9 +70,10 @@ long calculate_time_diff(struct timespec start, struct timespec end) {
   return seconds * 1000000000 + nanoseconds;
 }
 
-// Returns the statistics of compressing with Snappy.
+// Returns the statistics of compressing and decompressing with Snappy.
 BenchmarkResult benchmark_snappy(uint8_t *bitmap, size_t size) {
   struct timespec start, end;
+  BenchmarkResult results = {0};
 
   size_t output_length = snappy_max_compressed_length(size);
   char *output = malloc(output_length);
@@ -72,18 +81,30 @@ BenchmarkResult benchmark_snappy(uint8_t *bitmap, size_t size) {
   clock_gettime(CLOCK_MONOTONIC_RAW, &start);
   snappy_compress((const char *)bitmap, size, output, &output_length);
   clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+  results.comp_time = calculate_time_diff(start, end);
+
+  uint8_t *decompressed = malloc(size);
+  size_t decompressed_length = size;
+
+  clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+  snappy_uncompress(output, output_length, (char *)decompressed,
+                    &decompressed_length);
+  clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+  results.decomp_time = calculate_time_diff(start, end);
+
+  results.verified = (memcmp(bitmap, decompressed, size) == 0);
+  results.length = output_length;
 
   free(output);
+  free(decompressed);
 
-  long time_diff = calculate_time_diff(start, end);
-
-  BenchmarkResult results = {output_length, time_diff};
   return results;
 }
 
-// Returns the statistics of compressing with Zstd.
+// Returns the statistics of compressing and decompressing with Zstd.
 BenchmarkResult benchmark_zstd(uint8_t *bitmap, size_t size) {
   struct timespec start, end;
+  BenchmarkResult results = {0};
 
   size_t output_length = ZSTD_compressBound(size);
   void *output = malloc(output_length);
@@ -91,18 +112,29 @@ BenchmarkResult benchmark_zstd(uint8_t *bitmap, size_t size) {
   clock_gettime(CLOCK_MONOTONIC_RAW, &start);
   output_length = ZSTD_compress(output, output_length, bitmap, size, 1);
   clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+  results.comp_time = calculate_time_diff(start, end);
+
+  uint8_t *decompressed = malloc(size);
+
+  clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+  ZSTD_decompress(decompressed, size, output, output_length);
+  clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+  results.decomp_time = calculate_time_diff(start, end);
+
+  results.verified = (memcmp(bitmap, decompressed, size) == 0);
+  results.length = output_length;
 
   free(output);
+  free(decompressed);
 
-  long time_diff = calculate_time_diff(start, end);
-
-  BenchmarkResult results = {output_length, time_diff};
   return results;
 }
 
-// Returns the statistics of compressing with our Vitemap encoding scheme.
+// Returns the statistics of compressing and decompressing with our Vitemap
+// encoding scheme.
 BenchmarkResult benchmark_vitemap(uint8_t *bitmap, size_t size) {
   struct timespec start, end;
+  BenchmarkResult results = {0};
 
   Vitemap *vm = vitemap_create(size);
   memcpy(vm->input, bitmap, size);
@@ -110,12 +142,25 @@ BenchmarkResult benchmark_vitemap(uint8_t *bitmap, size_t size) {
   clock_gettime(CLOCK_MONOTONIC_RAW, &start);
   size_t output_length = vitemap_compress(vm, size);
   clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+  results.comp_time = calculate_time_diff(start, end);
+
+  uint32_t data_size;
+  uint32_t buffer_size;
+  vitemap_extract_decompressed_sizes(vm->output, &data_size, &buffer_size);
+  uint8_t *decompressed = malloc(buffer_size);
+
+  clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+  vitemap_decompress(vm->output, output_length, decompressed);
+  clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+  results.decomp_time = calculate_time_diff(start, end);
+
+  results.verified =
+      (memcmp(bitmap, decompressed, size) == 0) && data_size == size;
+  results.length = output_length;
 
   vitemap_delete(vm);
+  free(decompressed);
 
-  long time_diff = calculate_time_diff(start, end);
-
-  BenchmarkResult results = {output_length, time_diff};
   return results;
 }
 
@@ -133,15 +178,20 @@ void calculate_stats(long times[], int n, double *mean, double *std_dev) {
   *std_dev = sqrt(*std_dev / (n - 1)); // Use n-1 for sample standard deviation
 }
 
-AggregatedResult remove_outliers_and_calculate_stats(long *times, int n) {
-  double mean, std_dev;
-  calculate_stats(times, n, &mean, &std_dev);
+AggregatedResult aggregate_results(long *comp_times, long *decomp_times, int n,
+                                   int verified) {
+  double comp_mean, comp_std_dev, decomp_mean, decomp_std_dev;
+  calculate_stats(comp_times, n, &comp_mean, &comp_std_dev);
+  calculate_stats(decomp_times, n, &decomp_mean, &decomp_std_dev);
 
-  double margin = 1.96 * (std_dev / sqrt(n));
+  double comp_margin = 1.96 * (comp_std_dev / sqrt(n));
+  double decomp_margin = 1.96 * (decomp_std_dev / sqrt(n));
 
-  AggregatedResult result;
-  result.avg_time = mean;
-  result.ci_margin = margin;
+  AggregatedResult result = {.avg_comp_time = comp_mean,
+                             .ci_comp_margin = comp_margin,
+                             .avg_decomp_time = decomp_mean,
+                             .ci_decomp_margin = decomp_margin,
+                             .verified = verified};
 
   return result;
 }
@@ -150,16 +200,20 @@ AggregatedResult
 aggregate_benchmark(uint8_t *bitmap, size_t size,
                     BenchmarkResult (*benchmark_func)(uint8_t *, size_t)) {
   long lengths[NUM_ITERATIONS];
-  long times[NUM_ITERATIONS];
+  long comp_times[NUM_ITERATIONS];
+  long decomp_times[NUM_ITERATIONS];
+  int verified = 1;
 
   for (int i = 0; i < NUM_ITERATIONS; i++) {
     BenchmarkResult result = benchmark_func(bitmap, size);
     lengths[i] = result.length;
-    times[i] = result.time;
+    comp_times[i] = result.comp_time;
+    decomp_times[i] = result.decomp_time;
+    verified &= result.verified;
   }
 
   AggregatedResult agg_result =
-      remove_outliers_and_calculate_stats(times, NUM_ITERATIONS);
+      aggregate_results(comp_times, decomp_times, NUM_ITERATIONS, verified);
   agg_result.length = lengths[0];
 
   return agg_result;
@@ -208,15 +262,18 @@ void process_file(const char *filename) {
   // Print results for this file
   printf("File: %s\n", filename);
   printf("initial, %ld\n", file_size);
-  printf("snappy, %ld (%f), %.2f ± %.2f\n", snappy.length,
-         (double)snappy.length / (double)file_size, snappy.avg_time,
-         snappy.ci_margin);
-  printf("zstd, %ld (%f), %.2f ± %.2f\n", zstd.length,
-         (double)zstd.length / (double)file_size, zstd.avg_time,
-         zstd.ci_margin);
-  printf("vitemap, %ld (%f), %.2f ± %.2f\n", vitemap.length,
-         (double)vitemap.length / (double)file_size, vitemap.avg_time,
-         vitemap.ci_margin);
+  printf("snappy, %ld (%f), %.2f ± %.2f, %.2f ± %.2f, %s\n", snappy.length,
+         (double)snappy.length / (double)file_size, snappy.avg_comp_time,
+         snappy.ci_comp_margin, snappy.avg_decomp_time, snappy.ci_decomp_margin,
+         snappy.verified ? "✓" : "✗");
+  printf("zstd, %ld (%f), %.2f ± %.2f, %.2f ± %.2f, %s\n", zstd.length,
+         (double)zstd.length / (double)file_size, zstd.avg_comp_time,
+         zstd.ci_comp_margin, zstd.avg_decomp_time, zstd.ci_decomp_margin,
+         zstd.verified ? "✓" : "✗");
+  printf("vitemap, %ld (%f), %.2f ± %.2f, %.2f ± %.2f, %s\n", vitemap.length,
+         (double)vitemap.length / (double)file_size, vitemap.avg_comp_time,
+         vitemap.ci_comp_margin, vitemap.avg_decomp_time,
+         vitemap.ci_decomp_margin, vitemap.verified ? "✓" : "✗");
   printf("\n");
 
   free(bitmap);
@@ -226,9 +283,12 @@ void process_file(const char *filename) {
   total_snappy_size += snappy.length;
   total_zstd_size += zstd.length;
   total_vitemap_size += vitemap.length;
-  total_snappy_time += snappy.avg_time;
-  total_zstd_time += zstd.avg_time;
-  total_vitemap_time += vitemap.avg_time;
+  total_snappy_comp_time += snappy.avg_comp_time;
+  total_zstd_comp_time += zstd.avg_comp_time;
+  total_vitemap_comp_time += vitemap.avg_comp_time;
+  total_snappy_decomp_time += snappy.avg_decomp_time;
+  total_zstd_decomp_time += zstd.avg_decomp_time;
+  total_vitemap_decomp_time += vitemap.avg_decomp_time;
 }
 
 // Runs benchmarks for all files within the ./traces directory.
@@ -268,19 +328,25 @@ int main() {
   printf("Aggregate Statistics:\n");
   printf("Average Initial Size: %.2f bytes\n",
          total_initial_size / total_files);
-  printf("Snappy - Average Size: %.2f bytes (%.4f), Average Time: %.2f ns\n",
+  printf("Snappy - Average Size: %.2f bytes (%.4f), Average Comp Time: %.2f "
+         "ns, Average Decomp Time: %.2f ns\n",
          total_snappy_size / total_files,
          (total_snappy_size / total_files) / (total_initial_size / total_files),
-         total_snappy_time / total_files);
-  printf("Zstd - Average Size: %.2f bytes (%.4f), Average Time: %.2f ns\n",
+         total_snappy_comp_time / total_files,
+         total_snappy_decomp_time / total_files);
+  printf("Zstd - Average Size: %.2f bytes (%.4f), Average Comp Time: %.2f ns, "
+         "Average Decomp Time: %.2f ns\n",
          total_zstd_size / total_files,
          (total_zstd_size / total_files) / (total_initial_size / total_files),
-         total_zstd_time / total_files);
-  printf("Vitemap - Average Size: %.2f bytes (%.4f), Average Time: %.2f ns\n",
+         total_zstd_comp_time / total_files,
+         total_zstd_decomp_time / total_files);
+  printf("Vitemap - Average Size: %.2f bytes (%.4f), Average Comp Time: %.2f "
+         "ns, Average Decomp Time: %.2f ns\n",
          total_vitemap_size / total_files,
          (total_vitemap_size / total_files) /
              (total_initial_size / total_files),
-         total_vitemap_time / total_files);
+         total_vitemap_comp_time / total_files,
+         total_vitemap_decomp_time / total_files);
 
   return 0;
 }
