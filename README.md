@@ -44,7 +44,7 @@ sudo apt-get install libsnappy-dev libzstd-dev
 ### Building and Running
 
 ```bash
-git clone https://github.com/your-username/vitemap.git
+git clone https://github.com/AlSchlo/vitemap.git
 cd vitemap
 make all
 ./target/benchmarking
