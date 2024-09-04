@@ -92,6 +92,8 @@ CPU max MHz:         4600.0000
 CPU min MHz:         800.0000
 ```
 
+**Note:** To achieve statistical significance, we run each benchmark multiple times on a "hot" cache.
+
 ![ViteMap Performance Comparison](resources/benchmarking.png)
 
 ## Contributing
