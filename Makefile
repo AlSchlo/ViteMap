@@ -1,26 +1,26 @@
 CC = gcc
 CFLAGS = -std=c2x -O3 -Wall -Wextra -Wpedantic -Wcast-align -Wcast-qual -Wdisabled-optimization \
-         -Wformat=2 -Winit-self -Wlogical-op -Wmissing-include-dirs -Wredundant-decls \
-         -Wshadow -Wstrict-overflow=5 -Wundef -Wno-unused -Wno-variadic-macros \
-         -Wno-parentheses -fdiagnostics-show-option -Werror -D_POSIX_C_SOURCE=199309L
+ -Wformat=2 -Winit-self -Wlogical-op -Wmissing-include-dirs -Wredundant-decls \
+ -Wshadow -Wstrict-overflow=5 -Wundef -Wno-unused -Wno-variadic-macros \
+ -Wno-parentheses -fdiagnostics-show-option -Werror -D_POSIX_C_SOURCE=199309L
 VITE_FLAGS = -mavx512f -mavx512bw -mavx512vl -mavx512vpopcntdq -mavx512vbmi -mavx512vbmi2 -mavx512bitalg
 BENCHMARK_LIBS = -lsnappy -lzstd -lrt
 ASAN_FLAGS = -fsanitize=address -fno-omit-frame-pointer -g
 LDFLAGS = -lrt -lm
 
-# Directories
 SRC_DIR = src
 TARGET_DIR = target
 OBJ_DIR = $(TARGET_DIR)/obj
 
-# Object files
 VITE_OBJ = $(OBJ_DIR)/vite.o
 TEST_OBJ = $(OBJ_DIR)/testing.o
 BENCHMARK_OBJ = $(OBJ_DIR)/benchmarking.o
 CLI_OBJ = $(OBJ_DIR)/cli.o
 
-# Targets
-all: $(TARGET_DIR)/testing $(TARGET_DIR)/cli $(TARGET_DIR)/benchmarking
+all: cli benchmarking testing
+cli: $(TARGET_DIR)/cli
+benchmarking: $(TARGET_DIR)/benchmarking
+testing: $(TARGET_DIR)/testing
 
 $(OBJ_DIR)/vite.o: $(SRC_DIR)/vite.c $(SRC_DIR)/vite.h | $(OBJ_DIR)
 	$(CC) $(CFLAGS) $(VITE_FLAGS) -c $< -o $@
@@ -53,4 +53,4 @@ $(OBJ_DIR) $(TARGET_DIR):
 clean:
 	rm -rf $(TARGET_DIR)
 
-.PHONY: all clean
+.PHONY: all clean cli benchmarking testing
